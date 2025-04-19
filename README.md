@@ -29,6 +29,11 @@ guest, we need to add a shared directory.<br>
    cd WayClipSync
    cp clipshare.desktop $HOME/.config/autostart/
    ```
+   **IMP** For some reason using the autostart doesn't work. Instead of that we can manually run the program on both the host and guest machine like this
+   ```
+   cd WayClipSync
+   python main.py $HOME/user/mountpoint/clipboard.txt
+   ```
    Ensure that you edit out `<user>` from the desktop entry and that the paths
    are correct.
 5. Now do the same thing for the guest.
