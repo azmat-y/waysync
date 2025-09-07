@@ -1,5 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=clipshare
-Exec=python /home/<user>/WayClipSync/main.py /home/<user>/mnt/share/clipboard.txt
-Terminal=false

@@ -1,94 +1,151 @@
-import os
-import time
+import socket
 import subprocess
 import argparse
-from pathlib import Path
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+import threading
 
-parser = argparse.ArgumentParser()
-parser.add_argument("path", help="Path to shared file")
+parser = argparse.ArgumentParser(description="Share clipboard over TCP.")
+parser.add_argument(
+    "mode", choices=["server", "client"], help="Run as 'server' or 'client'"
+)
+parser.add_argument(
+    "--host",
+    default="0.0.0.0",
+    help="Host IP address to bind/connect to (server) or connect to (client).",
+)
+parser.add_argument(
+    "--port", type=int, default=12345, help="Port to use for the connection."
+)
 args = parser.parse_args()
-
-target_dir = args.path
-if not Path(target_dir).exists():
-    parser.exit(1, "Invalid path\n")
-
-# Shared file path, It may be different for guest and host
-SHARED_FILE = target_dir
-POLL_INTERVAL = 1  # Seconds between clipboard checks
+HOST = args.host
+PORT = args.port
+POLL_INTERVAL = 1
 
 
-class SharedClipboardHandler(FileSystemEventHandler):
+class ClipboardHandler:
+    """
+    A class to handle getting and setting clipboard content using wl-paste and wl-copy.
+    """
+
     def __init__(self):
         self.last_clipboard = self.get_clipboard()
-        self.last_file_content = self.read_shared_file()
-        self.last_file_mtime = (
-            os.path.getmtime(SHARED_FILE) if os.path.exists(SHARED_FILE) else 0
-        )
 
     def get_clipboard(self):
+        """Get the current content of the clipboard using wl-paste."""
         try:
             return subprocess.check_output(["wl-paste"], text=True).strip()
-        except:
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            print("Warning: 'wl-paste' command not found. Clipboard can't be read.")
             return ""
 
     def set_clipboard(self, content):
-        subprocess.run(["wl-copy"], text=True, input=content)
-
-    def read_shared_file(self):
+        """Set the content of the clipboard using wl-copy."""
         try:
-            with open(SHARED_FILE, "r") as f:
-                return f.read().strip()
-        except:
-            return ""
+            subprocess.run(["wl-copy"], text=True, input=content, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            print("Warning: 'wl-copy' command not found. Clipboard can't be set.")
 
-    def write_shared_file(self, content):
-        with open(SHARED_FILE, "w") as f:
-            f.write(content)
 
-    def on_modified(self, event):
-        if event.src_path == SHARED_FILE:
-            # Shared file changed: update local clipboard
-            new_content = self.read_shared_file()
-            if new_content != self.last_clipboard:
-                self.set_clipboard(new_content)
-                self.last_clipboard = new_content
-                print("Clipboard updated from shared file.")
+def handle_client(conn, addr, clipboard_handler):
+    """
+    Handles communication with a connected client in a separate thread.
+    This function runs on the server.
+    """
+    print(f"Connected by {addr}")
+    try:
+        while True:
+            # Check for local clipboard changes to send to the client
+            current_clipboard = clipboard_handler.get_clipboard()
+            if current_clipboard != clipboard_handler.last_clipboard:
+                print("Local clipboard changed. Sending update to client.")
+                conn.sendall(current_clipboard.encode("utf-8"))
+                clipboard_handler.last_clipboard = current_clipboard
 
-    def sync_clipboard_to_file(self):
-        # Check local clipboard changes
-        current_clipboard = self.get_clipboard()
-        if current_clipboard != self.last_clipboard:
-            self.write_shared_file(current_clipboard)
-            self.last_clipboard = current_clipboard
-            print("Shared file updated from clipboard.")
+            conn.settimeout(POLL_INTERVAL)
+            try:
+                data = conn.recv(4096).decode("utf-8")
+                if not data:
+                    break  # Connection closed by client
 
-    def sync_file_to_clipboard(self):
-        # Check shared file changes (fallback if watchdog misses events)
-        if not os.path.exists(SHARED_FILE):
+                if data != clipboard_handler.last_clipboard:
+                    print("Received update from client. Updating local clipboard.")
+                    clipboard_handler.set_clipboard(data)
+                    clipboard_handler.last_clipboard = data
+            except socket.timeout:
+                continue
+
+    except (ConnectionResetError, BrokenPipeError):
+        print(f"Connection with {addr} was lost.")
+    finally:
+        print(f"Closing connection with {addr}.")
+        conn.close()
+
+
+def run_server(clipboard_handler):
+    """
+    Starts the TCP server to listen for incoming connections.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((HOST, PORT))
+        s.listen()
+        print(f"Server listening on {HOST}:{PORT}")
+
+        while True:
+            conn, addr = s.accept()
+            client_thread = threading.Thread(
+                target=handle_client, args=(conn, addr, clipboard_handler)
+            )
+            client_thread.daemon = True
+            client_thread.start()
+
+
+def run_client(clipboard_handler):
+    """
+    Connects to the TCP server and synchronizes the clipboard.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.connect((HOST, PORT))
+            print(f"Connected to server at {HOST}:{PORT}")
+        except ConnectionRefusedError:
+            print(f"Error: Connection refused. Is the server running at {HOST}:{PORT}?")
             return
-        current_mtime = os.path.getmtime(SHARED_FILE)
-        if current_mtime > self.last_file_mtime:
-            new_content = self.read_shared_file()
-            if new_content != self.last_clipboard:
-                self.set_clipboard(new_content)
-                self.last_clipboard = new_content
-                self.last_file_mtime = current_mtime
-                print("Clipboard updated from shared file (fallback).")
+
+        while True:
+            try:
+                # Send local clipboard changes to the server
+                current_clipboard = clipboard_handler.get_clipboard()
+                if current_clipboard != clipboard_handler.last_clipboard:
+                    print("Local clipboard changed. Sending update to server.")
+                    s.sendall(current_clipboard.encode("utf-8"))
+                    clipboard_handler.last_clipboard = current_clipboard
+
+                # Receive clipboard updates from the server (with a timeout)
+                s.settimeout(POLL_INTERVAL)
+                try:
+                    data = s.recv(4096).decode("utf-8")
+                    if data and data != clipboard_handler.last_clipboard:
+                        print("Received update from server. Updating local clipboard.")
+                        clipboard_handler.set_clipboard(data)
+                        clipboard_handler.last_clipboard = data
+                except socket.timeout:
+                    continue  # No data received, continue polling
+
+            except (ConnectionResetError, BrokenPipeError):
+                print("Connection to server lost. Exiting.")
+                break
 
 
 if __name__ == "__main__":
-    event_handler = SharedClipboardHandler()
-    observer = Observer()
-    observer.schedule(event_handler, path=os.path.dirname(SHARED_FILE), recursive=False)
-    observer.start()
+    clipboard_handler = ClipboardHandler()
 
-    try:
-        while True:
-            event_handler.sync_clipboard_to_file()  # Local -> Shared
-            event_handler.sync_file_to_clipboard()  # Shared -> Local
-            time.sleep(POLL_INTERVAL)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+    if args.mode == "server":
+        try:
+            run_server(clipboard_handler)
+        except KeyboardInterrupt:
+            print("\nShutting down server.")
+    elif args.mode == "client":
+        try:
+            run_client(clipboard_handler)
+        except KeyboardInterrupt:
+            print("\nExiting client.")

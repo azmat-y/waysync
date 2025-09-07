@@ -1,8 +1,8 @@
 # Introduction
-WayClipSync enables clipboard sharing between guest and host in
+waysync enables clipboard sharing between guest and host in
 wayland environments using wl-clipboard.
 
-## Why
+## Why?
 Clipboard sharing between guest and host does not work under a wayland
 session with `virt-manager`, `spice-vdagent` only handles the case for X-session.
 
@@ -11,30 +11,39 @@ This program uses wl-clipboard and therefore will not work without it.
 You can install it from your package manager.
 
 ## Setup
-First since the program makes use of a shared file across host and
-guest, we need to add a shared directory.<br>
-1. Enable shared memory in memory menu of the guest.
-2. Go to Hardware details > Add Hardware > Filesystem<br>
-   Driver: virtiofs <br>
-   source  path: src<br>
-   target path: tag<br>
-3. In guest VM<br>
-   Add this line in /etc/fstab<br>
-   `tag /home/user/mountpoint virtiofs rw, relatime 0 0`
-4. In Host: Setup repository and autostart files<br>
-   It is straightforward to install dependencies on the system itself<br>
-   ```
-   pip install watchdog
-   git clone https://github.com/azmat-y/WayClipSync.git
-   cd WayClipSync
-   cp clipshare.desktop $HOME/.config/autostart/
-   ```
-   **IMP** For some reason using the autostart doesn't work. Instead of that we can manually run the program on both the host and guest machine like this
-   ```
-   cd WayClipSync
-   python main.py $HOME/user/mountpoint/clipboard.txt
-   ```
-   Ensure that you edit out `<user>` from the desktop entry and that the paths
-   are correct.
-5. Now do the same thing for the guest.
-6. Reboot the machine.
+1. First, you need to configure firewall rules. I am using port 4444 here.
+```
+# Add port 4444 to the libvirt zone (where your VM traffic goes)
+sudo firewall-cmd --zone=libvirt --add-port=4444/tcp --permanent
+
+# Reload firewall rules
+sudo firewall-cmd --reload
+
+# Verify it was added
+sudo firewall-cmd --zone=libvirt --list-all
+
+```
+
+If the above does not work, you can try adding the rule to public zone.
+```
+sudo firewall-cmd --zone=public --add-port=4444/tcp
+```
+
+2. Figure out IP of your host from the guest HOST_IP. 
+```
+# From guest
+ip route | grep default 
+# you want the first ip
+# I will refer to this ip as HOST_IP
+```
+
+3. Clone on both host and guest and run.
+```
+git clone waysync
+
+# on host 
+python sync.py server --port 4444
+
+# on guest
+python sync.py client --host HOST_IP --port 4444
+```
