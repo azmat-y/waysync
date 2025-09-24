@@ -42,8 +42,8 @@ ip route | grep default
 git clone waysync
 
 # on host 
-python sync.py server --port 4444
+python main.py server --port 4444
 
 # on guest
-python sync.py client --host HOST_IP --port 4444
+python main.py client --host HOST_IP --port 4444
 ```
